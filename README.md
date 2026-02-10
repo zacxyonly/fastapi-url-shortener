@@ -32,8 +32,8 @@ Personal project by **ZAKI** (Jakarta, Indonesia) – started as a learning proj
 
 1. Clone repository
    ```bash
-   git clone https://github.com/[username-anda]/zaki-url-shortener.git
-   cd zaki-url-shortener
+   git clone https://github.com/zacxyonly/fastapi-url-shortener.git
+   cd fastapi-url-shortener
    ```
 
 2. Buat virtual environment & install dependencies
