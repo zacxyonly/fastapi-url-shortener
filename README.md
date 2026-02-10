@@ -47,7 +47,7 @@ Personal project by **ZAKI** (Jakarta, Indonesia) – started as a learning proj
 3. Jalankan server (development mode)
    ```bash
    export BASE_URL="http://localhost:8000"   # atau IP/domain kamu
-   # Contoh: export BASE_URL="https://short.zaki.my.id"
+   # Contoh: export BASE_URL="https://youdomain.com"
    uvicorn main:app --reload --host 0.0.0.0 --port 8000
    ```
 
@@ -61,8 +61,8 @@ Server siap di http://localhost:8000 (atau IP kamu).
 
 | Method | Endpoint                  | Deskripsi                              | Contoh Request                                      | Contoh Response                                      |
 |--------|---------------------------|----------------------------------------|-----------------------------------------------------|------------------------------------------------------|
-| POST   | `/shorten`                | Buat short URL baru                    | `{"url": "https://www.tokopedia.com"}`             | `{"short_url": "http://localhost:8000/ltrdYB"}`     |
-| GET    | `/{short_code}`           | Redirect ke URL asli + tambah klik     | GET http://localhost:8000/ltrdYB                   | 301 Redirect → https://www.tokopedia.com            |
+| POST   | `/shorten`                | Buat short URL baru                    | `{"url": "https://example.com"}`             | `{"short_url": "http://localhost:8000/ltrdYB"}`     |
+| GET    | `/{short_code}`           | Redirect ke URL asli + tambah klik     | GET http://localhost:8000/ltrdYB                   | 301 Redirect → https://example.com           |
 | GET    | `/stats/{short_code}`     | Lihat statistik link                   | GET http://localhost:8000/stats/ltrdYB             | `{"short_code":"ltrdYB", "original_url": "...", "clicks": 5, "created_at": "..."}` |
 
 ### Contoh Penggunaan via cURL
@@ -89,7 +89,7 @@ curl -I http://localhost:8000/ltrdYB
 - **BASE_URL**: Atur lewat environment variable supaya short link pakai domain yang benar  
   Contoh di production:
   ```bash
-  export BASE_URL="https://short.zaki.my.id"
+  export BASE_URL="https://youdomain.com"
   ```
 
 - **Port / Host**: Ubah di command uvicorn, misal `--port 80` (butuh sudo di Linux)
