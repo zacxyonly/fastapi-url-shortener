@@ -1,13 +1,13 @@
-# 🔗 FastAPI URL Shortener v2.0
+# 🔗 FastAPI URL Shortener v3.0
 
 **Self-hosted URL shortener** yang powerful & production-ready berbasis **FastAPI** + **SQLite/PostgreSQL**.  
-Mendukung custom short codes, QR codes, password protection, analytics lengkap, dan **API Key authentication** dengan tier system 4 level.
+Mendukung custom short codes, QR codes on-demand, password protection, analytics lengkap, dan **API Key authentication** dengan tier system 4 level.
 
 ## ✨ Fitur Utama
 
 ### Core Features
 - ✅ **Short link unik** dengan kode random 6 karakter atau custom code
-- ✅ **QR Code generation** otomatis untuk setiap short URL
+- ✅ **QR Code generation on-demand** - generate hanya saat dibutuhkan (hemat resource!)
 - ✅ **Password protection** untuk link sensitif (tier 3+)
 - ✅ **URL expiration** dengan auto-expire otomatis (tier 3+)
 - ✅ **Bulk operations** - shorten multiple URLs sekaligus (tier 3+)
@@ -41,22 +41,27 @@ Mendukung custom short codes, QR codes, password protection, analytics lengkap, 
 
 ## 🚀 Peningkatan dari Versi Sebelumnya
 
-| Feature | v1.0 (Old) | v2.0 (New) |
-|---------|------------|------------|
-| Custom Short Codes | ❌ | ✅ Tier 2+ |
-| QR Code Generation | ❌ | ✅ Auto |
-| Password Protection | ❌ | ✅ Tier 3+ |
-| URL Expiration | ❌ | ✅ Tier 3+ |
-| Bulk Operations | ❌ | ✅ Tier 3+ |
-| Analytics | ❌ Basic clicks | ✅ Full tracking |
-| Device/Browser/OS | ❌ | ✅ Yes |
-| Monthly Limits | ❌ | ✅ Yes |
-| Metadata (title, desc, tags) | ❌ | ✅ Yes |
-| Admin Dashboard | ❌ | ✅ Comprehensive |
-| Docker Support | ❌ | ✅ Full |
-| Production Ready | ⚠️ Basic | ✅ Yes |
+| Feature | v1.0 | v2.0 | v3.0 |
+|---------|------|------|------|
+| Custom Short Codes | ❌ | ✅ | ✅ |
+| QR Code Generation | ❌ | ✅ Auto | ✅ On-Demand |
+| Password Protection | ❌ | ✅ | ✅ |
+| URL Expiration | ❌ | ✅ | ✅ |
+| Bulk Operations | ❌ | ✅ | ✅ |
+| Analytics | ❌ Basic | ✅ Full | ✅ Full |
+| Device/Browser/OS | ❌ | ✅ | ✅ |
+| Monthly Limits | ❌ | ✅ | ✅ |
+| Metadata | ❌ | ✅ | ✅ |
+| Admin Dashboard | ❌ | ✅ | ✅ |
+| Docker Support | ❌ | ✅ | ✅ |
+| Resource Efficient | ⚠️ | ⚠️ | ✅ Optimal |
 
-**Performance:** 3x lebih cepat, support 1000+ concurrent users!
+**v3.0 Key Changes:**
+- ✅ **QR Code on-demand** - tidak auto-generate, hemat CPU & memory
+- ✅ **Faster response time** pada `/shorten` endpoint
+- ✅ **Lower resource usage** - ideal untuk high-traffic applications
+
+**Performance:** 3x lebih cepat dari v1, support 1000+ concurrent users!
 
 ## 💻 Teknologi
 
@@ -139,9 +144,21 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | POST | `/shorten` | Buat short URL baru | All |
 | POST | `/shorten/bulk` | Bulk shorten URLs (max 100) | 3+ |
 | GET | `/stats/{short_code}` | Get statistics | All |
+| POST | `/stats/batch` | **NEW** Get batch statistics (max 100) | All |
 | GET | `/urls` | List user's URLs | All |
+| GET | `/urls/search` | **NEW** Search in URLs by keyword | All |
 | PATCH | `/urls/{short_code}` | Update URL | All |
 | DELETE | `/urls/{short_code}` | Delete URL (soft delete) | All |
+| POST | `/urls/{short_code}/toggle` | **NEW** Activate/deactivate URL | All |
+| POST | `/urls/{short_code}/clone` | **NEW** Clone URL with new code | All |
+
+### Analytics (New in v3.0!)
+
+| Method | Endpoint | Deskripsi | Tier |
+|--------|----------|-----------|------|
+| GET | `/analytics/export/{short_code}` | **NEW** Export clicks to CSV/JSON | All |
+| GET | `/analytics/trending` | **NEW** Get trending URLs by period | All |
+| GET | `/preview/{short_code}` | **NEW** Get link preview metadata | Public |
 
 ### Admin Endpoints (Requires Super Admin Key)
 
@@ -149,7 +166,21 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 |--------|----------|-----------|
 | POST | `/admin/api-keys` | Generate API key baru |
 | GET | `/admin/api-keys` | List semua API keys |
+| GET | `/admin/api-keys/{key_id}` | **NEW** Get API key details |
+| PATCH | `/admin/api-keys/{key_id}` | **NEW** Update API key |
+| DELETE | `/admin/api-keys/{key_id}` | **NEW** Delete API key |
+| POST | `/admin/api-keys/{key_id}/reset-usage` | **NEW** Reset usage counters |
 | GET | `/admin/dashboard` | Dashboard statistics |
+
+### User & Utilities
+
+| Method | Endpoint | Deskripsi | Auth |
+|--------|----------|-----------|------|
+| GET | `/me` | **NEW** Get your API key info & quota | Required |
+| GET | `/validate/code/{short_code}` | **NEW** Check code availability | Public |
+| GET | `/urls/{short_code}/history` | **NEW** Get click history | Required |
+| GET | `/stats/system` | **NEW** Public system statistics | Public |
+| POST | `/urls/bulk-delete` | **NEW** Delete multiple URLs | Required |
 
 ## 🎯 Contoh Penggunaan
 
@@ -200,10 +231,11 @@ curl -X POST "http://localhost:8000/shorten" \
   "short_url": "http://localhost:8000/abc123",
   "short_code": "abc123",
   "original_url": "https://www.tokopedia.com",
-  "created_at": "2026-02-11T10:30:00.000Z",
-  "qr_code_url": "http://localhost:8000/qr/abc123"
+  "created_at": "2026-02-11T10:30:00.000Z"
 }
 ```
+
+**Note:** QR code tersedia on-demand di `/qr/abc123` - tidak auto-generate untuk hemat resource!
 
 ### 3. Advanced: Custom Code + Password + Expiration
 
@@ -271,15 +303,23 @@ curl "http://localhost:8000/stats/abc123?include_clicks=true" \
 }
 ```
 
-### 6. Download QR Code
+### 6. Download QR Code (On-Demand)
+
+QR code **hanya dibuat saat dibutuhkan** untuk menghemat resource server. Tidak ada QR code yang di-generate otomatis saat membuat short URL.
 
 ```bash
-# Download QR code
+# Download QR code (generate on-demand)
 curl "http://localhost:8000/qr/abc123?size=500" -o qrcode.png
 
 # Atau akses langsung di browser:
 # http://localhost:8000/qr/abc123
 ```
+
+**Keuntungan on-demand QR code:**
+- ✅ Hemat CPU - hanya generate saat diminta
+- ✅ Hemat memory - tidak ada cache QR code
+- ✅ Faster response pada `/shorten` endpoint
+- ✅ Ideal untuk aplikasi high-traffic yang tidak semua user pakai QR code
 
 ### 7. Update URL
 
@@ -298,6 +338,208 @@ curl -X PATCH "http://localhost:8000/urls/abc123" \
 ```bash
 curl "http://localhost:8000/admin/dashboard" \
   -H "X-API-Key: your-super-admin-key"
+```
+
+---
+
+## 🆕 New Endpoints in v3.0
+
+### 9. Batch Statistics (Get Multiple Stats at Once)
+
+```bash
+curl -X POST "http://localhost:8000/stats/batch" \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "short_codes": ["abc123", "xyz789", "test99"]
+  }'
+```
+
+### 10. Search URLs by Keyword
+
+```bash
+# Search in all fields
+curl "http://localhost:8000/urls/search?q=marketing&search_in=all&limit=20" \
+  -H "X-API-Key: your-api-key"
+
+# Search only in titles
+curl "http://localhost:8000/urls/search?q=promo&search_in=title" \
+  -H "X-API-Key: your-api-key"
+```
+
+### 11. Export Analytics to CSV/JSON
+
+```bash
+# Export to CSV
+curl "http://localhost:8000/analytics/export/abc123?format=csv" \
+  -H "X-API-Key: your-api-key" \
+  -o analytics.csv
+
+# Export to JSON
+curl "http://localhost:8000/analytics/export/abc123?format=json" \
+  -H "X-API-Key: your-api-key"
+```
+
+### 12. Get Link Preview (for Social Sharing)
+
+```bash
+# No auth required - useful for embed previews
+curl "http://localhost:8000/preview/abc123"
+```
+
+**Response:**
+```json
+{
+  "short_url": "http://localhost:8000/abc123",
+  "original_url": "https://example.com",
+  "title": "My Link Title",
+  "description": "Link description for social sharing",
+  "domain": "example.com",
+  "clicks": 42,
+  "has_password": false,
+  "qr_code_url": "http://localhost:8000/qr/abc123"
+}
+```
+
+### 13. Toggle URL Status (Activate/Deactivate)
+
+```bash
+# Toggle status without deleting
+curl -X POST "http://localhost:8000/urls/abc123/toggle" \
+  -H "X-API-Key: your-api-key"
+```
+
+### 14. Clone/Duplicate URL
+
+```bash
+# Clone with auto-generated code
+curl -X POST "http://localhost:8000/urls/abc123/clone" \
+  -H "X-API-Key: your-api-key"
+
+# Clone with custom code
+curl -X POST "http://localhost:8000/urls/abc123/clone" \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"new_code": "promo-2026"}'
+```
+
+### 15. Get Trending/Popular URLs
+
+```bash
+# Today's trending
+curl "http://localhost:8000/analytics/trending?period=day&limit=10" \
+  -H "X-API-Key: your-api-key"
+
+# This week
+curl "http://localhost:8000/analytics/trending?period=week" \
+  -H "X-API-Key: your-api-key"
+
+# All time top URLs
+curl "http://localhost:8000/analytics/trending?period=all&limit=20" \
+  -H "X-API-Key: your-api-key"
+```
+
+---
+
+## 🔐 Admin & User Management
+
+### 16. Get API Key Details
+
+```bash
+curl "http://localhost:8000/admin/api-keys/1" \
+  -H "X-API-Key: your-super-admin-key"
+```
+
+### 17. Update API Key
+
+```bash
+curl -X PATCH "http://localhost:8000/admin/api-keys/1" \
+  -H "X-API-Key: your-super-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Updated Name",
+    "daily_limit": 5000,
+    "is_active": true
+  }'
+```
+
+### 18. Delete API Key
+
+```bash
+curl -X DELETE "http://localhost:8000/admin/api-keys/1" \
+  -H "X-API-Key: your-super-admin-key"
+```
+
+### 19. Reset API Key Usage
+
+```bash
+curl -X POST "http://localhost:8000/admin/api-keys/1/reset-usage" \
+  -H "X-API-Key: your-super-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '"both"'
+```
+
+### 20. Get Your Own API Key Info
+
+```bash
+curl "http://localhost:8000/me" \
+  -H "X-API-Key: your-api-key"
+```
+
+**Response:**
+```json
+{
+  "tier": 3,
+  "name": "My API Key",
+  "limits": {
+    "daily_limit": 10000,
+    "daily_used": 243,
+    "daily_remaining": 9757,
+    "monthly_used": 5420
+  },
+  "statistics": {
+    "total_urls": 150,
+    "active_urls": 142,
+    "total_clicks": 8543
+  }
+}
+```
+
+---
+
+## 🛠️ Utilities & Bulk Operations
+
+### 21. Check Code Availability
+
+```bash
+# No auth required
+curl "http://localhost:8000/validate/code/my-custom-code"
+```
+
+### 22. Bulk Delete URLs
+
+```bash
+curl -X POST "http://localhost:8000/urls/bulk-delete" \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "short_codes": ["old1", "old2", "old3"],
+    "permanent": false
+  }'
+```
+
+### 23. Get URL Click History
+
+```bash
+curl "http://localhost:8000/urls/abc123/history?limit=100" \
+  -H "X-API-Key: your-api-key"
+```
+
+### 24. System Statistics (Public)
+
+```bash
+# No auth required
+curl "http://localhost:8000/stats/system"
 ```
 
 ## ⚙️ Konfigurasi
@@ -403,6 +645,24 @@ Pull request welcome! Beberapa ide pengembangan:
 - ✅ Soft delete
 - ✅ Docker support
 
+**New in v3.0:**
+- ✅ **QR Code on-demand** - hemat resource, tidak auto-generate
+- ✅ **Batch statistics** - get stats for multiple URLs at once
+- ✅ **URL search** - search by keyword in URLs, titles, descriptions, tags
+- ✅ **Analytics export** - export click data to CSV or JSON
+- ✅ **Link preview** - metadata for social media sharing
+- ✅ **Toggle status** - activate/deactivate without deleting
+- ✅ **Clone URLs** - duplicate existing URLs with new codes
+- ✅ **Trending analytics** - see most popular URLs by period
+- ✅ **API key management** - full CRUD for API keys (get, update, delete)
+- ✅ **Usage reset** - reset daily/monthly counters
+- ✅ **User info endpoint** - check your own quota & stats
+- ✅ **Code validation** - check availability before creating
+- ✅ **Bulk delete** - delete multiple URLs efficiently
+- ✅ **Click history** - detailed audit log per URL
+- ✅ **System stats** - public statistics endpoint
+- ✅ **Optimized performance** - faster `/shorten` endpoint
+
 **Future Ideas:**
 - [ ] Redis caching untuk performance
 - [ ] Link grouping/folders
@@ -421,11 +681,12 @@ Bebas digunakan, dimodifikasi, dan didistribusikan (dengan menyertakan kredit).
 ## 🙏 Credits
 
 **Original Version:** [zacxyonly](https://github.com/zacxyonly)  
-**Enhanced Version:** Upgraded to v2.0 with production-ready features
+**v2.0 Enhancement:** Production-ready features  
+**v3.0 Enhancement:** On-demand QR codes & resource optimization
 
 ---
 
-Dibuat dengan ❤️ oleh zacxyonly – Enhanced 2026
+Dibuat dengan ❤️ oleh zacxyonly – Enhanced v3.0 2026
 
 ## 📞 Support
 

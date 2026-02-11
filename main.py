@@ -37,8 +37,8 @@ Base.metadata.create_all(bind=engine)
 # Initialize FastAPI app
 app = FastAPI(
     title="Advanced URL Shortener API",
-    description="Production-ready URL shortener with analytics, QR codes, and more",
-    version="2.0.0",
+    description="Production-ready URL shortener with analytics, QR codes (on-demand), and more",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -278,8 +278,7 @@ def shorten_url(
             "short_url": f"{BASE_URL}/{short_code}",
             "short_code": short_code,
             "original_url": original_url,
-            "created_at": new_url.created_at.isoformat(),
-            "qr_code_url": f"{BASE_URL}/qr/{short_code}"
+            "created_at": new_url.created_at.isoformat()
         }
         
         if expires_at:
@@ -495,6 +494,377 @@ def get_qr_code(
     return StreamingResponse(buf, media_type="image/png")
 
 
+# NEW v3.0: Batch statistics
+@app.post("/stats/batch", tags=["Analytics"])
+def get_batch_stats(
+    short_codes: List[str] = Body(..., max_items=100),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Get statistics for multiple URLs at once (max 100)"""
+    results = []
+    
+    for code in short_codes:
+        url_entry = db.query(URL).filter(
+            URL.short_code == code,
+            URL.is_deleted == False
+        ).first()
+        
+        if url_entry:
+            results.append({
+                "short_code": code,
+                "original_url": url_entry.original_url,
+                "clicks": url_entry.clicks,
+                "is_active": url_entry.is_active,
+                "created_at": url_entry.created_at.isoformat()
+            })
+        else:
+            results.append({
+                "short_code": code,
+                "error": "Not found"
+            })
+    
+    return {
+        "total": len(results),
+        "results": results
+    }
+
+
+# NEW v3.0: Search URLs
+@app.get("/urls/search", tags=["URLs"])
+def search_urls(
+    q: str = Query(..., min_length=1),
+    search_in: str = Query("all", regex="^(url|title|description|tags|all)$"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Search in user's URLs by keyword"""
+    query = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    )
+    
+    search_term = f"%{q}%"
+    
+    if search_in == "url":
+        query = query.filter(URL.original_url.ilike(search_term))
+    elif search_in == "title":
+        query = query.filter(URL.title.ilike(search_term))
+    elif search_in == "description":
+        query = query.filter(URL.description.ilike(search_term))
+    elif search_in == "tags":
+        query = query.filter(URL.tags.ilike(search_term))
+    else:  # all
+        query = query.filter(
+            or_(
+                URL.original_url.ilike(search_term),
+                URL.title.ilike(search_term),
+                URL.description.ilike(search_term),
+                URL.tags.ilike(search_term)
+            )
+        )
+    
+    results = query.limit(limit).all()
+    
+    return {
+        "query": q,
+        "search_in": search_in,
+        "total": len(results),
+        "results": [
+            {
+                "short_code": u.short_code,
+                "short_url": f"{BASE_URL}/{u.short_code}",
+                "original_url": u.original_url,
+                "title": u.title,
+                "description": u.description,
+                "tags": u.tags.split(',') if u.tags else [],
+                "clicks": u.clicks,
+                "created_at": u.created_at.isoformat()
+            }
+            for u in results
+        ]
+    }
+
+
+# NEW v3.0: Export analytics to CSV
+@app.get("/analytics/export/{short_code}", tags=["Analytics"])
+def export_analytics(
+    short_code: str,
+    format: str = Query("csv", regex="^(csv|json)$"),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Export click analytics to CSV or JSON"""
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check ownership
+    if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only export analytics for URLs you created"
+        )
+    
+    clicks = db.query(URLClick).filter(URLClick.url_id == url_entry.id).all()
+    
+    if format == "csv":
+        import csv
+        output = BytesIO()
+        output.write(b'\xef\xbb\xbf')  # UTF-8 BOM
+        writer = csv.writer(output.wrapped if hasattr(output, 'wrapped') else output, 
+                           delimiter=',', quoting=csv.QUOTE_MINIMAL)
+        
+        # Header
+        writer.writerow(['Timestamp', 'Device', 'Browser', 'OS', 'Country', 'City', 'Referer'])
+        
+        # Data
+        for click in clicks:
+            output.write((
+                f"{click.clicked_at.isoformat()},{click.device_type or 'unknown'},"
+                f"{click.browser or 'unknown'},{click.os or 'unknown'},"
+                f"{click.country or 'unknown'},{click.city or 'unknown'},"
+                f"\"{click.referer or 'direct'}\"\n"
+            ).encode('utf-8'))
+        
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=analytics_{short_code}.csv"
+            }
+        )
+    else:  # json
+        data = [
+            {
+                "timestamp": c.clicked_at.isoformat(),
+                "device": c.device_type,
+                "browser": c.browser,
+                "os": c.os,
+                "country": c.country,
+                "city": c.city,
+                "referer": c.referer,
+                "ip": c.ip_address[:10] + "..." if c.ip_address else None  # Partial IP for privacy
+            }
+            for c in clicks
+        ]
+        
+        return {
+            "short_code": short_code,
+            "total_clicks": len(data),
+            "exported_at": datetime.utcnow().isoformat(),
+            "data": data
+        }
+
+
+# NEW v3.0: Get link preview/metadata
+@app.get("/preview/{short_code}", tags=["URLs"])
+def get_link_preview(
+    short_code: str,
+    db: Session = Depends(get_db)
+):
+    """Get link preview metadata (useful for sharing on social media)"""
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False,
+        URL.is_active == True
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check if expired
+    if url_entry.expires_at and datetime.utcnow() > url_entry.expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This link has expired"
+        )
+    
+    return {
+        "short_url": f"{BASE_URL}/{short_code}",
+        "original_url": url_entry.original_url,
+        "title": url_entry.title or "Short Link",
+        "description": url_entry.description or f"Redirects to {get_domain_from_url(url_entry.original_url)}",
+        "domain": get_domain_from_url(url_entry.original_url),
+        "clicks": url_entry.clicks,
+        "created_at": url_entry.created_at.isoformat(),
+        "has_password": bool(url_entry.password_hash),
+        "qr_code_url": f"{BASE_URL}/qr/{short_code}"
+    }
+
+
+# NEW v3.0: Deactivate/Reactivate URL
+@app.post("/urls/{short_code}/toggle", tags=["URLs"])
+def toggle_url_status(
+    short_code: str,
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Toggle URL active status (activate/deactivate)"""
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check ownership
+    if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only toggle URLs you created"
+        )
+    
+    # Toggle status
+    url_entry.is_active = not url_entry.is_active
+    url_entry.updated_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "short_code": short_code,
+        "is_active": url_entry.is_active,
+        "message": "URL activated" if url_entry.is_active else "URL deactivated"
+    }
+
+
+# NEW v3.0: Clone/Duplicate URL
+@app.post("/urls/{short_code}/clone", tags=["URLs"])
+def clone_url(
+    short_code: str,
+    new_code: Optional[str] = Body(None),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Clone an existing URL with a new short code"""
+    original = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not original:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Generate new short code
+    if new_code:
+        if not api_key.can_create_custom_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your tier doesn't support custom codes"
+            )
+        if not is_valid_short_code(new_code):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid short code format"
+            )
+        if db.query(URL).filter(URL.short_code == new_code).first():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Short code already exists"
+            )
+        cloned_code = new_code
+    else:
+        while True:
+            cloned_code = generate_short_code(length=6)
+            if not db.query(URL).filter(URL.short_code == cloned_code).first():
+                break
+    
+    # Create clone
+    cloned = URL(
+        short_code=cloned_code,
+        original_url=original.original_url,
+        title=original.title,
+        description=original.description,
+        tags=original.tags,
+        expires_at=original.expires_at,
+        password_hash=original.password_hash,
+        creator_api_key=api_key.key
+    )
+    
+    db.add(cloned)
+    api_key.usage_count_today += 1
+    api_key.usage_count_month += 1
+    db.commit()
+    db.refresh(cloned)
+    
+    return {
+        "original_code": short_code,
+        "cloned_code": cloned_code,
+        "short_url": f"{BASE_URL}/{cloned_code}",
+        "message": "URL cloned successfully"
+    }
+
+
+# NEW v3.0: Get popular/trending URLs
+@app.get("/analytics/trending", tags=["Analytics"])
+def get_trending_urls(
+    period: str = Query("day", regex="^(day|week|month|all)$"),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Get trending/most clicked URLs for the user"""
+    query = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    )
+    
+    # Filter by period
+    if period == "day":
+        since = datetime.utcnow() - timedelta(days=1)
+    elif period == "week":
+        since = datetime.utcnow() - timedelta(days=7)
+    elif period == "month":
+        since = datetime.utcnow() - timedelta(days=30)
+    else:  # all time
+        since = None
+    
+    urls = query.order_by(URL.clicks.desc()).limit(limit).all()
+    
+    results = []
+    for url in urls:
+        # Get clicks in period
+        clicks_query = db.query(URLClick).filter(URLClick.url_id == url.id)
+        if since:
+            clicks_query = clicks_query.filter(URLClick.clicked_at >= since)
+        period_clicks = clicks_query.count()
+        
+        results.append({
+            "short_code": url.short_code,
+            "short_url": f"{BASE_URL}/{url.short_code}",
+            "original_url": url.original_url,
+            "title": url.title,
+            "total_clicks": url.clicks,
+            "period_clicks": period_clicks,
+            "created_at": url.created_at.isoformat()
+        })
+    
+    return {
+        "period": period,
+        "limit": limit,
+        "results": results
+    }
+
+
 # Get URL stats
 @app.get("/stats/{short_code}", tags=["Analytics"])
 def get_url_stats(
@@ -527,6 +897,7 @@ def get_url_stats(
         "is_active": url_entry.is_active,
         "expires_at": url_entry.expires_at.isoformat() if url_entry.expires_at else None,
         "has_password": bool(url_entry.password_hash),
+        "qr_code_url": f"{BASE_URL}/qr/{short_code}"  # Available on-demand
     }
     
     # Click analytics
@@ -766,6 +1137,401 @@ def list_api_keys(
             }
             for k in keys
         ]
+    }
+
+
+# NEW v3.0: Get single API key details
+@app.get("/admin/api-keys/{key_id}", tags=["Admin"])
+def get_api_key_details(
+    key_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    """Get detailed information about a specific API key"""
+    api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+    
+    # Get URL count for this key
+    url_count = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    ).count()
+    
+    # Get total clicks for URLs created by this key
+    total_clicks = db.query(func.sum(URL.clicks)).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    ).scalar() or 0
+    
+    return {
+        "id": api_key.id,
+        "key_preview": f"{api_key.key[:10]}...{api_key.key[-10:]}",
+        "tier": api_key.tier,
+        "name": api_key.name,
+        "description": api_key.description,
+        "daily_limit": api_key.daily_limit,
+        "monthly_limit": api_key.monthly_limit,
+        "usage_count_today": api_key.usage_count_today,
+        "usage_count_month": api_key.usage_count_month,
+        "is_active": api_key.is_active,
+        "permissions": {
+            "can_create_custom_code": api_key.can_create_custom_code,
+            "can_set_expiration": api_key.can_set_expiration,
+            "can_password_protect": api_key.can_password_protect,
+            "can_bulk_create": api_key.can_bulk_create,
+        },
+        "statistics": {
+            "total_urls_created": url_count,
+            "total_clicks": total_clicks
+        },
+        "created_at": api_key.created_at.isoformat(),
+        "updated_at": api_key.updated_at.isoformat() if api_key.updated_at else None
+    }
+
+
+# NEW v3.0: Update API key
+@app.patch("/admin/api-keys/{key_id}", tags=["Admin"])
+def update_api_key(
+    key_id: int,
+    name: Optional[str] = Body(None),
+    description: Optional[str] = Body(None),
+    daily_limit: Optional[int] = Body(None),
+    monthly_limit: Optional[int] = Body(None),
+    is_active: Optional[bool] = Body(None),
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    """Update API key settings"""
+    api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+    
+    if name is not None:
+        api_key.name = name
+    if description is not None:
+        api_key.description = description
+    if daily_limit is not None:
+        api_key.daily_limit = daily_limit
+    if monthly_limit is not None:
+        api_key.monthly_limit = monthly_limit
+    if is_active is not None:
+        api_key.is_active = is_active
+    
+    api_key.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(api_key)
+    
+    return {
+        "message": "API key updated successfully",
+        "id": api_key.id,
+        "name": api_key.name,
+        "is_active": api_key.is_active,
+        "updated_at": api_key.updated_at.isoformat()
+    }
+
+
+# NEW v3.0: Delete API key
+@app.delete("/admin/api-keys/{key_id}", tags=["Admin"])
+def delete_api_key(
+    key_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    """Permanently delete an API key"""
+    api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+    
+    # Check if key has created URLs
+    url_count = db.query(URL).filter(URL.creator_api_key == api_key.key).count()
+    
+    db.delete(api_key)
+    db.commit()
+    
+    return {
+        "message": "API key deleted successfully",
+        "id": key_id,
+        "urls_created": url_count,
+        "note": "Associated URLs will remain but won't show owner"
+    }
+
+
+# NEW v3.0: Reset API key usage counters
+@app.post("/admin/api-keys/{key_id}/reset-usage", tags=["Admin"])
+def reset_api_key_usage(
+    key_id: int,
+    reset_type: str = Body(..., regex="^(daily|monthly|both)$"),
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    """Reset usage counters for an API key"""
+    api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+    
+    if reset_type in ["daily", "both"]:
+        api_key.usage_count_today = 0
+        api_key.last_reset_daily = datetime.utcnow()
+    
+    if reset_type in ["monthly", "both"]:
+        api_key.usage_count_month = 0
+        api_key.last_reset_monthly = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "message": f"Usage counters reset ({reset_type})",
+        "id": key_id,
+        "usage_count_today": api_key.usage_count_today,
+        "usage_count_month": api_key.usage_count_month
+    }
+
+
+# NEW v3.0: Bulk delete URLs
+@app.post("/urls/bulk-delete", tags=["URLs"])
+def bulk_delete_urls(
+    short_codes: List[str] = Body(..., max_items=100),
+    permanent: bool = Body(False),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Delete multiple URLs at once (soft delete by default)"""
+    deleted = []
+    errors = []
+    
+    for code in short_codes:
+        try:
+            url_entry = db.query(URL).filter(
+                URL.short_code == code,
+                URL.is_deleted == False
+            ).first()
+            
+            if not url_entry:
+                errors.append({"short_code": code, "error": "Not found"})
+                continue
+            
+            # Check ownership
+            if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+                errors.append({"short_code": code, "error": "Not authorized"})
+                continue
+            
+            if permanent and api_key.key == SUPER_ADMIN_KEY:
+                # Permanent delete (only super admin)
+                db.delete(url_entry)
+            else:
+                # Soft delete
+                url_entry.is_deleted = True
+                url_entry.is_active = False
+                url_entry.updated_at = datetime.utcnow()
+            
+            deleted.append(code)
+            
+        except Exception as e:
+            errors.append({"short_code": code, "error": str(e)})
+    
+    db.commit()
+    
+    return {
+        "deleted_count": len(deleted),
+        "error_count": len(errors),
+        "deleted": deleted,
+        "errors": errors,
+        "type": "permanent" if permanent else "soft"
+    }
+
+
+# NEW v3.0: Get user's own API key info
+@app.get("/me", tags=["User"])
+def get_my_info(
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Get information about your own API key"""
+    # Count URLs
+    url_count = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    ).count()
+    
+    active_urls = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False,
+        URL.is_active == True
+    ).count()
+    
+    # Total clicks
+    total_clicks = db.query(func.sum(URL.clicks)).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    ).scalar() or 0
+    
+    # Calculate remaining quota
+    daily_remaining = None
+    monthly_remaining = None
+    
+    if api_key.daily_limit:
+        daily_remaining = max(0, api_key.daily_limit - api_key.usage_count_today)
+    
+    if api_key.monthly_limit:
+        monthly_remaining = max(0, api_key.monthly_limit - api_key.usage_count_month)
+    
+    return {
+        "tier": api_key.tier,
+        "name": api_key.name,
+        "description": api_key.description,
+        "limits": {
+            "daily_limit": api_key.daily_limit,
+            "monthly_limit": api_key.monthly_limit,
+            "daily_used": api_key.usage_count_today,
+            "monthly_used": api_key.usage_count_month,
+            "daily_remaining": daily_remaining,
+            "monthly_remaining": monthly_remaining,
+        },
+        "permissions": {
+            "can_create_custom_code": api_key.can_create_custom_code,
+            "can_set_expiration": api_key.can_set_expiration,
+            "can_password_protect": api_key.can_password_protect,
+            "can_bulk_create": api_key.can_bulk_create,
+        },
+        "statistics": {
+            "total_urls": url_count,
+            "active_urls": active_urls,
+            "total_clicks": total_clicks,
+        },
+        "account_created": api_key.created_at.isoformat()
+    }
+
+
+# NEW v3.0: Validate short code availability
+@app.get("/validate/code/{short_code}", tags=["Utilities"])
+def validate_code_availability(
+    short_code: str,
+    db: Session = Depends(get_db)
+):
+    """Check if a short code is available (no auth required)"""
+    if not is_valid_short_code(short_code):
+        return {
+            "available": False,
+            "short_code": short_code,
+            "reason": "Invalid format (use only letters, numbers, hyphens, underscores)"
+        }
+    
+    if len(short_code) < 3 or len(short_code) > 20:
+        return {
+            "available": False,
+            "short_code": short_code,
+            "reason": "Length must be between 3 and 20 characters"
+        }
+    
+    existing = db.query(URL).filter(URL.short_code == short_code).first()
+    
+    if existing:
+        return {
+            "available": False,
+            "short_code": short_code,
+            "reason": "Already in use"
+        }
+    
+    return {
+        "available": True,
+        "short_code": short_code,
+        "message": "Available for use"
+    }
+
+
+# NEW v3.0: Get URL history/audit log
+@app.get("/urls/{short_code}/history", tags=["URLs"])
+def get_url_history(
+    short_code: str,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    """Get click history for a URL"""
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check ownership
+    if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view history for URLs you created"
+        )
+    
+    clicks = db.query(URLClick).filter(
+        URLClick.url_id == url_entry.id
+    ).order_by(URLClick.clicked_at.desc()).limit(limit).all()
+    
+    return {
+        "short_code": short_code,
+        "total_clicks": url_entry.clicks,
+        "history_count": len(clicks),
+        "history": [
+            {
+                "timestamp": c.clicked_at.isoformat(),
+                "device": c.device_type,
+                "browser": c.browser,
+                "os": c.os,
+                "referer": c.referer,
+                "country": c.country,
+                "city": c.city
+            }
+            for c in clicks
+        ]
+    }
+
+
+# NEW v3.0: System statistics (public)
+@app.get("/stats/system", tags=["System"])
+def get_system_stats(db: Session = Depends(get_db)):
+    """Get public system statistics"""
+    total_urls = db.query(URL).filter(URL.is_deleted == False).count()
+    total_clicks = db.query(func.sum(URL.clicks)).scalar() or 0
+    active_urls = db.query(URL).filter(
+        URL.is_deleted == False,
+        URL.is_active == True
+    ).count()
+    
+    # URLs created in last 24 hours
+    yesterday = datetime.utcnow() - timedelta(days=1)
+    urls_today = db.query(URL).filter(
+        URL.created_at >= yesterday,
+        URL.is_deleted == False
+    ).count()
+    
+    return {
+        "total_urls": total_urls,
+        "active_urls": active_urls,
+        "total_clicks": total_clicks,
+        "urls_created_today": urls_today,
+        "uptime": "Healthy",
+        "version": "3.0.0"
     }
 
 
