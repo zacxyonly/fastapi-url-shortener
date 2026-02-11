@@ -1,0 +1,450 @@
+{
+  "info": {
+    "name": "URL Shortener API v2",
+    "description": "Complete API collection for testing URL Shortener",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "your-api-key-here",
+      "type": "string"
+    },
+    {
+      "key": "admin_key",
+      "value": "your-super-admin-key-here",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "URLs",
+      "item": [
+        {
+          "name": "Shorten URL - Basic",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://www.example.com/very/long/url\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/shorten",
+              "host": ["{{base_url}}"],
+              "path": ["shorten"]
+            }
+          }
+        },
+        {
+          "name": "Shorten URL - Custom Code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://www.github.com\",\n  \"custom_code\": \"github\",\n  \"title\": \"GitHub\",\n  \"description\": \"Where the world builds software\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/shorten",
+              "host": ["{{base_url}}"],
+              "path": ["shorten"]
+            }
+          }
+        },
+        {
+          "name": "Shorten URL - Password Protected",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://www.example.com/secret\",\n  \"password\": \"secret123\",\n  \"title\": \"Protected Link\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/shorten",
+              "host": ["{{base_url}}"],
+              "path": ["shorten"]
+            }
+          }
+        },
+        {
+          "name": "Shorten URL - With Expiration",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://www.example.com/temporary\",\n  \"expires_in_days\": 30,\n  \"title\": \"Temporary Link\",\n  \"tags\": \"temp, test\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/shorten",
+              "host": ["{{base_url}}"],
+              "path": ["shorten"]
+            }
+          }
+        },
+        {
+          "name": "Bulk Shorten URLs",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"urls\": [\n    \"https://www.google.com\",\n    \"https://www.facebook.com\",\n    \"https://www.twitter.com\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/shorten/bulk",
+              "host": ["{{base_url}}"],
+              "path": ["shorten", "bulk"]
+            }
+          }
+        },
+        {
+          "name": "Get QR Code",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/qr/abc123?size=300",
+              "host": ["{{base_url}}"],
+              "path": ["qr", "abc123"],
+              "query": [
+                {
+                  "key": "size",
+                  "value": "300"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Redirect to URL",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/abc123",
+              "host": ["{{base_url}}"],
+              "path": ["abc123"]
+            }
+          }
+        },
+        {
+          "name": "Redirect with Password",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/abc123?password=secret123",
+              "host": ["{{base_url}}"],
+              "path": ["abc123"],
+              "query": [
+                {
+                  "key": "password",
+                  "value": "secret123"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update URL",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Updated Title\",\n  \"description\": \"Updated description\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/urls/abc123",
+              "host": ["{{base_url}}"],
+              "path": ["urls", "abc123"]
+            }
+          }
+        },
+        {
+          "name": "Delete URL",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/urls/abc123",
+              "host": ["{{base_url}}"],
+              "path": ["urls", "abc123"]
+            }
+          }
+        },
+        {
+          "name": "List My URLs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/urls?limit=20&offset=0&active_only=true",
+              "host": ["{{base_url}}"],
+              "path": ["urls"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                },
+                {
+                  "key": "active_only",
+                  "value": "true"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics",
+      "item": [
+        {
+          "name": "Get URL Stats",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/stats/abc123",
+              "host": ["{{base_url}}"],
+              "path": ["stats", "abc123"]
+            }
+          }
+        },
+        {
+          "name": "Get Stats with Clicks",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/stats/abc123?include_clicks=true",
+              "host": ["{{base_url}}"],
+              "path": ["stats", "abc123"],
+              "query": [
+                {
+                  "key": "include_clicks",
+                  "value": "true"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Generate API Key - Tier 1",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tier\": 1,\n  \"name\": \"Basic User\",\n  \"description\": \"Basic tier with 100 requests/day\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/admin/api-keys",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "api-keys"]
+            }
+          }
+        },
+        {
+          "name": "Generate API Key - Tier 3",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tier\": 3,\n  \"name\": \"Premium User\",\n  \"description\": \"Premium tier with all features\",\n  \"daily_limit\": 5000,\n  \"monthly_limit\": 100000\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/admin/api-keys",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "api-keys"]
+            }
+          }
+        },
+        {
+          "name": "List All API Keys",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/admin/api-keys",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "api-keys"]
+            }
+          }
+        },
+        {
+          "name": "Admin Dashboard",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{admin_key}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/admin/dashboard",
+              "host": ["{{base_url}}"],
+              "path": ["admin", "dashboard"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
