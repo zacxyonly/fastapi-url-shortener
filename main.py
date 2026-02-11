@@ -1,198 +1,820 @@
-from fastapi import FastAPI, Depends, HTTPException, Request, Header, Body
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Depends, HTTPException, Request, Header, Body, Query, status
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, HttpUrl
-from database import get_db, URL, Base, engine  # Pastikan import Base dan engine
-import os
-import random
-import string
-import secrets
+from sqlalchemy import func, and_, or_
+from pydantic import BaseModel, HttpUrl, Field, validator
+from typing import Optional, List
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
-from datetime import datetime, date
-from sqlalchemy import Column, Integer, String, DateTime, Boolean
+import os
+import secrets
+import qrcode
+from io import BytesIO
+import logging
 
-# Buat tabel api_keys kalau belum ada
-class ApiKey(Base):
-    __tablename__ = "api_keys"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    key = Column(String(64), unique=True, index=True, nullable=False)
-    tier = Column(Integer, nullable=False)  # 1-4
-    name = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    is_active = Column(Boolean, default=True)
-    daily_limit = Column(Integer, nullable=True)  # null = unlimited
-    usage_count_today = Column(Integer, default=0)
-    last_reset = Column(DateTime, default=datetime.utcnow)
+from database import get_db, URL, URLClick, ApiKey, Base, engine
+from utils import (
+    generate_short_code, is_valid_short_code, hash_password, 
+    verify_password, generate_api_key, parse_user_agent,
+    validate_url, get_domain_from_url, sanitize_tags
+)
 
-Base.metadata.create_all(bind=engine)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Ambil BASE_URL dari env
-BASE_URL = os.getenv("BASE_URL")
-
-# Super admin key (khusus pemilik, set via env)
+# Environment variables
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 SUPER_ADMIN_KEY = os.getenv("SUPER_ADMIN_KEY")
 if not SUPER_ADMIN_KEY:
-    raise ValueError("SUPER_ADMIN_KEY environment variable harus di-set!")
+    raise ValueError("SUPER_ADMIN_KEY environment variable must be set!")
 
-app = FastAPI(title="Simple - URL Shortener")
+# Create tables
+Base.metadata.create_all(bind=engine)
 
+# Initialize FastAPI app
+app = FastAPI(
+    title="Advanced URL Shortener API",
+    description="Production-ready URL shortener with analytics, QR codes, and more",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Models
 class URLCreate(BaseModel):
     url: HttpUrl
+    custom_code: Optional[str] = Field(None, min_length=3, max_length=20)
+    expires_in_days: Optional[int] = Field(None, ge=1, le=365)
+    password: Optional[str] = Field(None, min_length=4, max_length=100)
+    title: Optional[str] = Field(None, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    tags: Optional[str] = Field(None, max_length=500)
+    
+    @validator('custom_code')
+    def validate_custom_code(cls, v):
+        if v and not is_valid_short_code(v):
+            raise ValueError('Custom code can only contain letters, numbers, hyphens, and underscores')
+        return v
 
-def generate_short_code(length: int = 6) -> str:
-    chars = string.ascii_letters + string.digits
-    db = next(get_db())
-    while True:
-        code = ''.join(random.choice(chars) for _ in range(length))
-        if not db.query(URL).filter(URL.short_code == code).first():
-            return code
 
-@app.post("/shorten")
-def shorten_url(
-    item: URLCreate,
+class BulkURLCreate(BaseModel):
+    urls: List[HttpUrl] = Field(..., max_items=100)
+
+
+class URLUpdate(BaseModel):
+    url: Optional[HttpUrl] = None
+    title: Optional[str] = Field(None, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    tags: Optional[str] = Field(None, max_length=500)
+    is_active: Optional[bool] = None
+
+
+class PasswordVerify(BaseModel):
+    password: str
+
+
+class ApiKeyCreate(BaseModel):
+    tier: int = Field(..., ge=1, le=4)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    daily_limit: Optional[int] = Field(None, ge=0)
+    monthly_limit: Optional[int] = Field(None, ge=0)
+
+
+# Dependency for API key validation
+def verify_api_key(
     x_api_key: str = Header(None, alias="X-API-Key"),
     db: Session = Depends(get_db)
 ):
     if not x_api_key:
-        raise HTTPException(status_code=401, detail="API Key diperlukan di header X-API-Key")
-
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="API Key required in X-API-Key header"
+        )
+    
     api_key_entry = db.query(ApiKey).filter(
         ApiKey.key == x_api_key,
         ApiKey.is_active == True
     ).first()
-
+    
     if not api_key_entry:
-        raise HTTPException(status_code=401, detail="API Key tidak valid atau dinonaktifkan")
-
-    # Reset usage harian jika perlu
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive API Key"
+        )
+    
+    # Reset daily usage if needed
     today = datetime.utcnow().date()
-    last_reset_date = api_key_entry.last_reset.date() if api_key_entry.last_reset else today
-
+    last_reset_date = api_key_entry.last_reset_daily.date() if api_key_entry.last_reset_daily else today
+    
     if last_reset_date < today:
         api_key_entry.usage_count_today = 0
-        api_key_entry.last_reset = datetime.utcnow()
+        api_key_entry.last_reset_daily = datetime.utcnow()
         db.commit()
-
-    # Cek limit
-    if api_key_entry.daily_limit is not None and api_key_entry.usage_count_today >= api_key_entry.daily_limit:
+    
+    # Reset monthly usage if needed
+    current_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if api_key_entry.last_reset_monthly < current_month:
+        api_key_entry.usage_count_month = 0
+        api_key_entry.last_reset_monthly = datetime.utcnow()
+        db.commit()
+    
+    # Check daily limit
+    if api_key_entry.daily_limit and api_key_entry.usage_count_today >= api_key_entry.daily_limit:
         raise HTTPException(
-            status_code=429,
-            detail=f"Limit harian tercapai ({api_key_entry.daily_limit}/hari untuk tier {api_key_entry.tier})"
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Daily limit reached ({api_key_entry.daily_limit} requests/day for tier {api_key_entry.tier})"
+        )
+    
+    # Check monthly limit
+    if api_key_entry.monthly_limit and api_key_entry.usage_count_month >= api_key_entry.monthly_limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Monthly limit reached ({api_key_entry.monthly_limit} requests/month)"
+        )
+    
+    return api_key_entry
+
+
+def verify_super_admin(x_api_key: str = Header(None, alias="X-API-Key")):
+    if not x_api_key or x_api_key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Super admin only."
+        )
+    return True
+
+
+# Health check endpoint
+@app.get("/health", tags=["System"])
+def health_check(db: Session = Depends(get_db)):
+    try:
+        # Test database connection
+        db.execute("SELECT 1")
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": "connected"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service unhealthy"
         )
 
-    # Tambah usage
-    api_key_entry.usage_count_today += 1
+
+# Create short URL
+@app.post("/shorten", tags=["URLs"])
+def shorten_url(
+    item: URLCreate,
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    try:
+        original_url = str(item.url).rstrip('/')
+        
+        # Validate URL
+        if not validate_url(original_url):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or unsafe URL"
+            )
+        
+        # Check custom code permissions
+        if item.custom_code and not api_key.can_create_custom_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your tier doesn't support custom short codes"
+            )
+        
+        # Check expiration permissions
+        if item.expires_in_days and not api_key.can_set_expiration:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your tier doesn't support expiration dates"
+            )
+        
+        # Check password protection permissions
+        if item.password and not api_key.can_password_protect:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your tier doesn't support password protection"
+            )
+        
+        # Generate or use custom short code
+        if item.custom_code:
+            short_code = item.custom_code
+            # Check if custom code already exists
+            if db.query(URL).filter(URL.short_code == short_code, URL.is_deleted == False).first():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Custom short code already in use"
+                )
+        else:
+            # Check if URL already exists
+            existing = db.query(URL).filter(
+                URL.original_url == original_url,
+                URL.is_deleted == False,
+                URL.is_active == True
+            ).first()
+            if existing:
+                return {
+                    "short_url": f"{BASE_URL}/{existing.short_code}",
+                    "short_code": existing.short_code,
+                    "created_at": existing.created_at.isoformat()
+                }
+            
+            # Generate unique short code
+            while True:
+                short_code = generate_short_code(length=6)
+                if not db.query(URL).filter(URL.short_code == short_code).first():
+                    break
+        
+        # Calculate expiration
+        expires_at = None
+        if item.expires_in_days:
+            expires_at = datetime.utcnow() + timedelta(days=item.expires_in_days)
+        
+        # Hash password if provided
+        password_hash = None
+        if item.password:
+            password_hash = hash_password(item.password)
+        
+        # Create URL entry
+        new_url = URL(
+            short_code=short_code,
+            original_url=original_url,
+            expires_at=expires_at,
+            password_hash=password_hash,
+            creator_api_key=api_key.key,
+            title=item.title,
+            description=item.description,
+            tags=sanitize_tags(item.tags) if item.tags else None
+        )
+        
+        db.add(new_url)
+        
+        # Update API key usage
+        api_key.usage_count_today += 1
+        api_key.usage_count_month += 1
+        
+        db.commit()
+        db.refresh(new_url)
+        
+        response = {
+            "short_url": f"{BASE_URL}/{short_code}",
+            "short_code": short_code,
+            "original_url": original_url,
+            "created_at": new_url.created_at.isoformat(),
+            "qr_code_url": f"{BASE_URL}/qr/{short_code}"
+        }
+        
+        if expires_at:
+            response["expires_at"] = expires_at.isoformat()
+        if item.password:
+            response["password_protected"] = True
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating short URL: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create short URL"
+        )
+
+
+# Bulk create URLs
+@app.post("/shorten/bulk", tags=["URLs"])
+def bulk_shorten_urls(
+    item: BulkURLCreate,
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    if not api_key.can_bulk_create:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your tier doesn't support bulk operations"
+        )
+    
+    results = []
+    errors = []
+    
+    for idx, url in enumerate(item.urls):
+        try:
+            original_url = str(url).rstrip('/')
+            
+            if not validate_url(original_url):
+                errors.append({"index": idx, "url": original_url, "error": "Invalid URL"})
+                continue
+            
+            # Check if exists
+            existing = db.query(URL).filter(
+                URL.original_url == original_url,
+                URL.is_deleted == False,
+                URL.is_active == True
+            ).first()
+            
+            if existing:
+                results.append({
+                    "short_url": f"{BASE_URL}/{existing.short_code}",
+                    "short_code": existing.short_code,
+                    "original_url": original_url,
+                    "existing": True
+                })
+                continue
+            
+            # Generate short code
+            while True:
+                short_code = generate_short_code(length=6)
+                if not db.query(URL).filter(URL.short_code == short_code).first():
+                    break
+            
+            new_url = URL(
+                short_code=short_code,
+                original_url=original_url,
+                creator_api_key=api_key.key
+            )
+            
+            db.add(new_url)
+            
+            results.append({
+                "short_url": f"{BASE_URL}/{short_code}",
+                "short_code": short_code,
+                "original_url": original_url,
+                "existing": False
+            })
+            
+        except Exception as e:
+            errors.append({"index": idx, "url": str(url), "error": str(e)})
+    
+    # Update usage
+    api_key.usage_count_today += len(results)
+    api_key.usage_count_month += len(results)
+    
     db.commit()
-
-    # Logic shorten seperti biasa
-    original_url = str(item.url).rstrip('/')
-    parsed = urlparse(original_url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="URL harus http:// atau https://")
-
-    existing = db.query(URL).filter(URL.original_url == original_url).first()
-    if existing:
-        return {"short_url": f"{BASE_URL}/{existing.short_code}"}
-
-    new_url = URL(original_url=original_url)
-    short_code = generate_short_code(length=6)
-    new_url.short_code = short_code
-
-    db.add(new_url)
-    db.commit()
-    db.refresh(new_url)
-
-    return {"short_url": f"{BASE_URL}/{short_code}"}
-
-@app.get("/{short_code}")
-def redirect(short_code: str, request: Request, db: Session = Depends(get_db)):
-    url_entry = db.query(URL).filter(URL.short_code == short_code).first()
-    if not url_entry:
-        raise HTTPException(status_code=404, detail="Short URL tidak ditemukan")
-
-    url_entry.clicks += 1
-    db.commit()
-
-    return RedirectResponse(url=url_entry.original_url, status_code=301)
-
-@app.get("/stats/{short_code}")
-def get_stats(short_code: str, db: Session = Depends(get_db)):
-    url = db.query(URL).filter(URL.short_code == short_code).first()
-    if not url:
-        raise HTTPException(status_code=404, detail="Short URL tidak ditemukan")
-
+    
     return {
-        "short_code": short_code,
-        "original_url": url.original_url,
-        "clicks": url.clicks,
-        "created_at": url.created_at.isoformat() if url.created_at else None
+        "success_count": len(results),
+        "error_count": len(errors),
+        "results": results,
+        "errors": errors
     }
 
-# Endpoint khusus super admin untuk generate key baru
-@app.post("/admin/generate-key")
-def generate_api_key(
-    payload: dict = Body(...),
-    x_api_key: str = Header(None, alias="X-API-Key"),
+
+# Redirect endpoint
+@app.get("/{short_code}", tags=["URLs"])
+async def redirect_to_url(
+    short_code: str,
+    request: Request,
+    password: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    if not x_api_key or x_api_key != SUPER_ADMIN_KEY:
-        raise HTTPException(status_code=403, detail="Akses ditolak. Hanya super admin.")
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check if active
+    if not url_entry.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This short URL has been deactivated"
+        )
+    
+    # Check expiration
+    if url_entry.expires_at and datetime.utcnow() > url_entry.expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="This short URL has expired"
+        )
+    
+    # Check password protection
+    if url_entry.password_hash:
+        if not password:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Password required. Add ?password=YOUR_PASSWORD to URL"
+            )
+        if not verify_password(password, url_entry.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect password"
+            )
+    
+    # Parse user agent
+    user_agent_string = request.headers.get("user-agent", "")
+    ua_info = parse_user_agent(user_agent_string)
+    
+    # Get IP (considering proxy headers)
+    ip_address = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if not ip_address:
+        ip_address = request.headers.get("x-real-ip", "")
+    if not ip_address:
+        ip_address = request.client.host if request.client else None
+    
+    # Record click
+    click = URLClick(
+        url_id=url_entry.id,
+        ip_address=ip_address,
+        user_agent=user_agent_string[:500] if user_agent_string else None,
+        referer=request.headers.get("referer", "")[:500] if request.headers.get("referer") else None,
+        device_type=ua_info.get("device_type"),
+        browser=ua_info.get("browser")[:50] if ua_info.get("browser") else None,
+        os=ua_info.get("os")[:50] if ua_info.get("os") else None,
+    )
+    
+    db.add(click)
+    
+    # Update click count
+    url_entry.clicks += 1
+    
+    db.commit()
+    
+    return RedirectResponse(url=url_entry.original_url, status_code=status.HTTP_301_MOVED_PERMANENTLY)
 
-    tier = payload.get("tier")
-    name = payload.get("name", "Unnamed Key")
 
-    if tier not in [1, 2, 3, 4]:
-        raise HTTPException(status_code=400, detail="Tier harus antara 1 sampai 4")
+# Get QR code
+@app.get("/qr/{short_code}", tags=["URLs"])
+def get_qr_code(
+    short_code: str,
+    size: int = Query(300, ge=100, le=1000),
+    db: Session = Depends(get_db)
+):
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Generate QR code
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(f"{BASE_URL}/{short_code}")
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    img = img.resize((size, size))
+    
+    # Convert to bytes
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    
+    return StreamingResponse(buf, media_type="image/png")
 
-    # Limit per tier (bisa disesuaikan)
-    limits = {1: 100, 2: 1000, 3: 10000, 4: None}  # 4 = unlimited
-    daily_limit = limits.get(tier)
 
-    new_key = secrets.token_urlsafe(32)  # Secure random key (\~43 char)
+# Get URL stats
+@app.get("/stats/{short_code}", tags=["Analytics"])
+def get_url_stats(
+    short_code: str,
+    include_clicks: bool = Query(False),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Basic stats
+    stats = {
+        "short_code": short_code,
+        "short_url": f"{BASE_URL}/{short_code}",
+        "original_url": url_entry.original_url,
+        "title": url_entry.title,
+        "description": url_entry.description,
+        "tags": url_entry.tags.split(',') if url_entry.tags else [],
+        "clicks": url_entry.clicks,
+        "created_at": url_entry.created_at.isoformat(),
+        "is_active": url_entry.is_active,
+        "expires_at": url_entry.expires_at.isoformat() if url_entry.expires_at else None,
+        "has_password": bool(url_entry.password_hash),
+    }
+    
+    # Click analytics
+    clicks = db.query(URLClick).filter(URLClick.url_id == url_entry.id).all()
+    
+    # Device breakdown
+    device_counts = {}
+    browser_counts = {}
+    os_counts = {}
+    
+    for click in clicks:
+        device_counts[click.device_type or "unknown"] = device_counts.get(click.device_type or "unknown", 0) + 1
+        browser_counts[click.browser or "unknown"] = browser_counts.get(click.browser or "unknown", 0) + 1
+        os_counts[click.os or "unknown"] = os_counts.get(click.os or "unknown", 0) + 1
+    
+    stats["analytics"] = {
+        "devices": device_counts,
+        "browsers": dict(sorted(browser_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
+        "operating_systems": dict(sorted(os_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
+        "total_clicks": len(clicks)
+    }
+    
+    # Include individual clicks if requested
+    if include_clicks:
+        stats["recent_clicks"] = [
+            {
+                "clicked_at": c.clicked_at.isoformat(),
+                "device_type": c.device_type,
+                "browser": c.browser,
+                "os": c.os,
+                "referer": c.referer,
+            }
+            for c in sorted(clicks, key=lambda x: x.clicked_at, reverse=True)[:100]
+        ]
+    
+    return stats
 
+
+# Update URL
+@app.patch("/urls/{short_code}", tags=["URLs"])
+def update_url(
+    short_code: str,
+    updates: URLUpdate,
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check ownership (only creator or super admin can update)
+    if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update URLs you created"
+        )
+    
+    # Apply updates
+    if updates.url:
+        url_entry.original_url = str(updates.url).rstrip('/')
+    if updates.title is not None:
+        url_entry.title = updates.title
+    if updates.description is not None:
+        url_entry.description = updates.description
+    if updates.tags is not None:
+        url_entry.tags = sanitize_tags(updates.tags)
+    if updates.is_active is not None:
+        url_entry.is_active = updates.is_active
+    
+    url_entry.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(url_entry)
+    
+    return {
+        "message": "URL updated successfully",
+        "short_code": short_code,
+        "updated_at": url_entry.updated_at.isoformat()
+    }
+
+
+# Delete URL (soft delete)
+@app.delete("/urls/{short_code}", tags=["URLs"])
+def delete_url(
+    short_code: str,
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    url_entry = db.query(URL).filter(
+        URL.short_code == short_code,
+        URL.is_deleted == False
+    ).first()
+    
+    if not url_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Short URL not found"
+        )
+    
+    # Check ownership
+    if url_entry.creator_api_key != api_key.key and api_key.key != SUPER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete URLs you created"
+        )
+    
+    # Soft delete
+    url_entry.is_deleted = True
+    url_entry.is_active = False
+    url_entry.updated_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {"message": "URL deleted successfully", "short_code": short_code}
+
+
+# List user's URLs
+@app.get("/urls", tags=["URLs"])
+def list_urls(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    active_only: bool = Query(True),
+    db: Session = Depends(get_db),
+    api_key: ApiKey = Depends(verify_api_key)
+):
+    query = db.query(URL).filter(
+        URL.creator_api_key == api_key.key,
+        URL.is_deleted == False
+    )
+    
+    if active_only:
+        query = query.filter(URL.is_active == True)
+    
+    total = query.count()
+    urls = query.order_by(URL.created_at.desc()).offset(offset).limit(limit).all()
+    
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "urls": [
+            {
+                "short_code": u.short_code,
+                "short_url": f"{BASE_URL}/{u.short_code}",
+                "original_url": u.original_url,
+                "title": u.title,
+                "clicks": u.clicks,
+                "created_at": u.created_at.isoformat(),
+                "is_active": u.is_active,
+            }
+            for u in urls
+        ]
+    }
+
+
+# Admin: Generate API key
+@app.post("/admin/api-keys", tags=["Admin"])
+def create_api_key(
+    key_data: ApiKeyCreate,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    # Set permissions based on tier
+    tier_permissions = {
+        1: {"can_create_custom_code": False, "can_set_expiration": False, "can_password_protect": False, "can_bulk_create": False},
+        2: {"can_create_custom_code": True, "can_set_expiration": False, "can_password_protect": False, "can_bulk_create": False},
+        3: {"can_create_custom_code": True, "can_set_expiration": True, "can_password_protect": True, "can_bulk_create": True},
+        4: {"can_create_custom_code": True, "can_set_expiration": True, "can_password_protect": True, "can_bulk_create": True},
+    }
+    
+    # Default limits
+    default_limits = {
+        1: {"daily": 100, "monthly": 2000},
+        2: {"daily": 1000, "monthly": 20000},
+        3: {"daily": 10000, "monthly": 200000},
+        4: {"daily": None, "monthly": None},
+    }
+    
+    new_key = generate_api_key()
+    permissions = tier_permissions[key_data.tier]
+    limits = default_limits[key_data.tier]
+    
     db_key = ApiKey(
         key=new_key,
-        tier=tier,
-        name=name,
-        daily_limit=daily_limit,
-        created_at=datetime.utcnow(),
-        last_reset=datetime.utcnow(),
-        is_active=True
+        tier=key_data.tier,
+        name=key_data.name,
+        description=key_data.description,
+        daily_limit=key_data.daily_limit if key_data.daily_limit is not None else limits["daily"],
+        monthly_limit=key_data.monthly_limit if key_data.monthly_limit is not None else limits["monthly"],
+        **permissions
     )
-
+    
     db.add(db_key)
     db.commit()
     db.refresh(db_key)
-
+    
     return {
-        "status": "success",
-        "generated_key": new_key,
-        "tier": tier,
-        "daily_limit": daily_limit,
-        "name": name,
+        "api_key": new_key,
+        "tier": key_data.tier,
+        "name": key_data.name,
+        "daily_limit": db_key.daily_limit,
+        "monthly_limit": db_key.monthly_limit,
+        "permissions": permissions,
         "created_at": db_key.created_at.isoformat()
     }
 
-# Opsional: Endpoint untuk lihat semua key (hanya super admin)
-@app.get("/admin/keys")
-def list_api_keys(
-    x_api_key: str = Header(None, alias="X-API-Key"),
-    db: Session = Depends(get_db)
-):
-    if not x_api_key or x_api_key != SUPER_ADMIN_KEY:
-        raise HTTPException(status_code=403, detail="Akses ditolak. Hanya super admin.")
 
+# Admin: List all API keys
+@app.get("/admin/api-keys", tags=["Admin"])
+def list_api_keys(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
     keys = db.query(ApiKey).all()
-    return [
-        {
-            "id": k.id,
-            "key": k.key[:10] + "..." + k.key[-10:],  # sembunyikan sebagian untuk keamanan
-            "tier": k.tier,
-            "name": k.name,
-            "daily_limit": k.daily_limit,
-            "usage_today": k.usage_count_today,
-            "is_active": k.is_active,
-            "created_at": k.created_at.isoformat()
-        } for k in keys
-    ]
+    
+    return {
+        "total": len(keys),
+        "keys": [
+            {
+                "id": k.id,
+                "key_preview": f"{k.key[:10]}...{k.key[-10:]}",
+                "tier": k.tier,
+                "name": k.name,
+                "daily_limit": k.daily_limit,
+                "monthly_limit": k.monthly_limit,
+                "usage_today": k.usage_count_today,
+                "usage_month": k.usage_count_month,
+                "is_active": k.is_active,
+                "created_at": k.created_at.isoformat()
+            }
+            for k in keys
+        ]
+    }
+
+
+# Admin: Dashboard stats
+@app.get("/admin/dashboard", tags=["Admin"])
+def admin_dashboard(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_super_admin)
+):
+    total_urls = db.query(URL).filter(URL.is_deleted == False).count()
+    active_urls = db.query(URL).filter(URL.is_deleted == False, URL.is_active == True).count()
+    total_clicks = db.query(func.sum(URL.clicks)).scalar() or 0
+    total_api_keys = db.query(ApiKey).count()
+    active_api_keys = db.query(ApiKey).filter(ApiKey.is_active == True).count()
+    
+    # Recent URLs
+    recent_urls = db.query(URL).filter(URL.is_deleted == False).order_by(URL.created_at.desc()).limit(10).all()
+    
+    # Top URLs by clicks
+    top_urls = db.query(URL).filter(URL.is_deleted == False).order_by(URL.clicks.desc()).limit(10).all()
+    
+    return {
+        "summary": {
+            "total_urls": total_urls,
+            "active_urls": active_urls,
+            "total_clicks": total_clicks,
+            "total_api_keys": total_api_keys,
+            "active_api_keys": active_api_keys,
+        },
+        "recent_urls": [
+            {
+                "short_code": u.short_code,
+                "original_url": u.original_url,
+                "clicks": u.clicks,
+                "created_at": u.created_at.isoformat()
+            }
+            for u in recent_urls
+        ],
+        "top_urls": [
+            {
+                "short_code": u.short_code,
+                "original_url": u.original_url,
+                "clicks": u.clicks,
+            }
+            for u in top_urls
+        ]
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
